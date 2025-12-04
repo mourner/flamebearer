@@ -1,20 +1,19 @@
 #!/usr/bin/env node
-'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const concat = require('concat-stream');
-const opn = require('opn');
+const open = require('open');
 const flamebearer = require('../');
 
 const input = process.stdin.isTTY ? fs.createReadStream(process.argv[2]) : process.stdin;
 
-input.pipe(concat(function (buf) {
+input.pipe(concat((buf) => {
     console.time('Parsed JSON in');
     let json = {};
     try {
         json = JSON.parse(buf.toString('utf8'));
-    } catch (e) {
+    } catch {
         // noop
     }
     if (!json.code || !json.ticks) {
@@ -46,7 +45,7 @@ input.pipe(concat(function (buf) {
     fs.writeFileSync('flamegraph.html', src);
     console.log(`Saved to flamegraph.html (${humanFileSize(src.length)}). Opening...`);
 
-    opn('flamegraph.html', {wait: false});
+    open('flamegraph.html', {wait: false});
 }));
 
 function humanFileSize(size) {

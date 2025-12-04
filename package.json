@@ -10,30 +10,20 @@
     "index.js",
     "viz.js"
   ],
-  "repository": {	
+  "repository": {
     "type": "git",
     "url": "https://github.com/mapbox/flamebearer.git"
   },
   "dependencies": {
-    "concat-stream": "^1.6.2",
-    "opn": "^5.3.0"
+    "concat-stream": "^2.0.0",
+    "open": "^11.0.0"
   },
   "devDependencies": {
-    "eslint": "^4.19.1",
-    "eslint-config-mourner": "^2.0.3"
-  },
-  "engines": {
-    "node": ">=8.5.0"
+    "eslint": "^9.39.1",
+    "eslint-config-mourner": "^4.1.0"
   },
   "scripts": {
     "test": "eslint index.js viz.js bin/flamebearer"
-  },
-  "eslintConfig": {
-    "extends": "mourner",
-    "rules": {
-      "no-var": "error",
-      "prefer-const": "error"
-    }
   },
   "keywords": [
     "flame graph",

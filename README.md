@@ -1,3 +1,6 @@
+> [!WARNING]
+> This project is deprecated. For a fast, modern flame graph explorer, check out [Speedscope](https://www.speedscope.app/).
+
 # 🔥 flamebearer
 
 A blazing fast [flame graph](http://www.brendangregg.com/flamegraphs.html) tool for Node and V8.

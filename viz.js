@@ -1,5 +1,3 @@
-'use strict';
-
 const introEl = document.getElementById('intro');
 const searchEl = document.getElementById('search');
 const highlightEl = document.getElementById('highlight');

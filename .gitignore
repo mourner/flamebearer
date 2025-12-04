@@ -1,3 +1,4 @@
 samples
 *.log
 flamegraph.html
+node_modules

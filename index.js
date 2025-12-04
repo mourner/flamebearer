@@ -1,11 +1,9 @@
-'use strict';
-
 // classifications borrowed from:
 // https://github.com/v8/v8/blob/master/tools/profview/profile-utils.js (BSD)
 function codeToName(code, sharedPath) {
     if (!code || !code.type) return '(unknown)';
 
-    let name = code.name;
+    let name = escapeHtml(code.name);
 
     if (code.type === 'CPP') {
         const matches = name.match(/[tT] ([^(<]*)/);
@@ -37,6 +35,15 @@ function codeToName(code, sharedPath) {
 
     return '(unknown)';
 }
+
+function escapeHtml(unsafe) {
+    return unsafe
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll('\'', '&#039;');
+};
 
 // given two strings (e.g. abc, abd), returns the common starting part (ab)
 function getSharedStringPart(str1, str2) {
