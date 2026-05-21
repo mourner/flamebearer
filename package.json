@@ -1,7 +1,7 @@
 {
   "name": "flamebearer",
   "version": "1.1.3",
-  "description": "Blazing fast flame graphs for V8 and Node",
+  "description": "A CLI for analyzing performance traces for AI agents and humans",
   "main": "index.js",
   "type": "module",
   "bin": "./bin/flamebearer",
@@ -22,12 +22,12 @@
     "test": "node --test test/*.test.js"
   },
   "keywords": [
-    "flame graph",
     "performance",
     "profiling",
     "v8",
-    "node"
+    "node",
+    "traces"
   ],
-  "author": "Vladimir Agafonkin",
+  "author": "Volodymyr Agafonkin",
   "license": "ISC"
 }
