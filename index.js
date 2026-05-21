@@ -259,8 +259,7 @@ export function buildShortener(urlCounts, threshold = 0.8) {
 
     const sources = [];
     for (const [origin, prefix] of prefixes) {
-        const host = origin.replace(/^https?:\/\//, '');
-        sources.push({tag: origin === dominant ? '' : host, prefix});
+        sources.push({tag: origin === dominant ? '' : originTag(origin), prefix});
     }
 
     function shorten(url) {
@@ -268,7 +267,7 @@ export function buildShortener(urlCounts, threshold = 0.8) {
         if (!origin) return url;
         const prefix = prefixes.get(origin);
         const path = prefix && url.startsWith(prefix) ? url.slice(prefix.length) : url.slice(origin.length);
-        return origin === dominant ? path : `[${origin.replace(/^https?:\/\//, '')}] ${path}`;
+        return origin === dominant ? path : `[${originTag(origin)}] ${path}`;
     }
 
     return {shorten, sources};
@@ -346,6 +345,12 @@ export function formatReport(trace, {top = 20, color = false} = {}) {
 
 function parseOrigin(url) {
     if (!url) return null;
-    const m = url.match(/^[a-z]+:\/\/[^/]*/);
+    const m = url.match(/^[a-z][a-z-]*:\/\/[^/]*/);
     return m ? m[0] : null;
+}
+
+function originTag(origin) {
+    const ext = origin.match(/^chrome-extension:\/\/([a-p]{6})/);
+    if (ext) return `ext:${ext[1]}`;
+    return origin.replace(/^https?:\/\//, '');
 }

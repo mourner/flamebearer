@@ -18,7 +18,8 @@
     "eslint-config-mourner": "^4.1.0"
   },
   "scripts": {
-    "test": "eslint"
+    "pretest": "eslint",
+    "test": "node --test test/*.test.js"
   },
   "keywords": [
     "flame graph",
