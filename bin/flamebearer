@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import {parseTrace, formatFrame} from '../index.js';
+import {parseTrace, formatFrame, buildShortener} from '../index.js';
 
 const file = process.argv[2];
 if (!file) {
@@ -11,6 +11,17 @@ if (!file) {
 const {threads} = parseTrace(fs.readFileSync(file));
 
 const TOP = 20;
+
+const urls = new Set();
+for (const t of threads) for (const {frame} of t.top) if (frame.url) urls.add(frame.url);
+const {shorten, sources} = buildShortener(urls);
+
+if (sources.length) {
+    console.log('Sources:');
+    for (const {tag, prefix} of sources) {
+        console.log(`  ${tag ? `[${tag}]`.padEnd(20) : ' '.repeat(20)}  ${prefix}`);
+    }
+}
 
 for (const t of threads) {
     const busyMs = t.busy / 1000;
@@ -25,6 +36,6 @@ for (const t of threads) {
         const {frame, time} = t.top[i];
         const ms = time / 1000;
         const pct = total > 0 ? (100 * time / (total * 1000)).toFixed(1) : '0.0';
-        console.log(`${String(i + 1).padStart(3)}. ${ms.toFixed(1).padStart(7)} ms  ${pct.padStart(5)}%  ${formatFrame(frame)}`);
+        console.log(`${String(i + 1).padStart(3)}. ${ms.toFixed(1).padStart(7)} ms  ${pct.padStart(5)}%  ${formatFrame(frame, shorten)}`);
     }
 }

@@ -69,9 +69,66 @@ function frameKey(f) {
     return `${f.functionName}|${f.url || ''}|${f.lineNumber || 0}|${f.columnNumber || 0}`;
 }
 
-export function formatFrame(f) {
+export function formatFrame(f, shorten) {
     const name = f.functionName || '(anonymous)';
     if (!f.url) return name;
     const loc = f.lineNumber >= 0 ? `:${f.lineNumber + 1}` : '';
-    return `${name}  ${f.url}${loc}`;
+    return `${name}  ${shorten ? shorten(f.url) : f.url}${loc}`;
+}
+
+export function buildShortener(urls) {
+    const byOrigin = new Map();
+    for (const url of urls) {
+        const origin = parseOrigin(url);
+        if (!origin) continue;
+        const list = byOrigin.get(origin);
+        if (list) list.push(url);
+        else byOrigin.set(origin, [url]);
+    }
+
+    let dominant = null;
+    let dominantCount = 0;
+    const prefixes = new Map();
+
+    for (const [origin, list] of byOrigin) {
+        let prefix = list[0];
+        for (let i = 1; i < list.length && prefix.length > origin.length; i++) {
+            prefix = commonPrefix(prefix, list[i]);
+        }
+        prefix = prefix.slice(0, prefix.lastIndexOf('/') + 1);
+        prefixes.set(origin, prefix);
+        if (list.length > dominantCount) {
+            dominantCount = list.length;
+            dominant = origin;
+        }
+    }
+
+    const sources = [];
+    for (const [origin, prefix] of prefixes) {
+        const host = origin.replace(/^https?:\/\//, '');
+        sources.push({tag: origin === dominant ? '' : host, prefix});
+    }
+
+    function shorten(url) {
+        const origin = parseOrigin(url);
+        const prefix = origin && prefixes.get(origin);
+        if (!prefix) return url;
+        const rest = url.slice(prefix.length);
+        return origin === dominant ? rest : `[${origin.replace(/^https?:\/\//, '')}] ${rest}`;
+    }
+
+    return {shorten, sources};
+}
+
+function parseOrigin(url) {
+    if (!url) return null;
+    const m = url.match(/^[a-z]+:\/\/[^/]+/);
+    return m ? m[0] : null;
+}
+
+function commonPrefix(a, b) {
+    const len = Math.min(a.length, b.length);
+    let i = 0;
+    while (i < len && a[i] === b[i]) i++;
+    return a.slice(0, i);
 }
