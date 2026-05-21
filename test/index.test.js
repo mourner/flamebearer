@@ -128,8 +128,8 @@ test('parseTrace collects embedded sourcemaps from metadata; resolveSourceMaps a
     const data = {
         metadata: {
             sourceMaps: [{
-                url: 'http://example.com/bundle.js',
-                sourceMapUrl: 'http://example.com/bundle.js.map',
+                url: 'http://example.com/dist/bundle.js',
+                sourceMapUrl: 'http://example.com/dist/bundle.js.map',
                 sourceMap: {version: 3, sources: ['../src/index.ts'], names: ['myFunc'], mappings: 'AAAAA'}
             }]
         },
@@ -139,7 +139,7 @@ test('parseTrace collects embedded sourcemaps from metadata; resolveSourceMaps a
                 cpuProfile: {
                     nodes: [
                         {id: 1, callFrame: {functionName: '(root)', url: '', lineNumber: -1, columnNumber: -1}},
-                        {id: 2, callFrame: {functionName: '(anonymous)', url: 'http://example.com/bundle.js', lineNumber: 0, columnNumber: 0}}
+                        {id: 2, callFrame: {functionName: '(anonymous)', url: 'http://example.com/dist/bundle.js', lineNumber: 0, columnNumber: 0}}
                     ],
                     samples: [2]
                 },
@@ -149,11 +149,12 @@ test('parseTrace collects embedded sourcemaps from metadata; resolveSourceMaps a
     };
 
     const trace = parseTrace(data);
-    assert.ok(trace.embeddedMaps.has('http://example.com/bundle.js'));
+    assert.ok(trace.embeddedMaps.has('http://example.com/dist/bundle.js'));
 
     resolveSourceMaps(trace);
     const f = trace.threads[0].top[0].frame;
-    assert.match(f.url, /index\.ts$/);
+    // resolved against the bundle URL so the shortener can collapse origins later
+    assert.equal(f.url, 'http://example.com/src/index.ts');
     assert.equal(f.functionName, 'myFunc');
 });
 

@@ -29,7 +29,9 @@ export function parseTrace(data) {
     const events = data.traceEvents || data;
     const embeddedMaps = new Map();
     for (const sm of data.metadata?.sourceMaps || []) {
-        if (sm.url && sm.sourceMap?.mappings) embeddedMaps.set(sm.url, sm.sourceMap);
+        if (sm.url && sm.sourceMap?.mappings) {
+            embeddedMaps.set(sm.url, new TraceMap(sm.sourceMap, sm.sourceMapUrl || sm.url));
+        }
     }
 
     const threadNames = new Map();
@@ -216,8 +218,7 @@ export function resolveSourceMaps(trace, {load = loadSiblingMap} = {}) {
 
         let map = cache.get(frame.url);
         if (map === undefined) {
-            const raw = embedded?.get(frame.url);
-            map = raw ? new TraceMap(raw) : load(frame.url);
+            map = embedded?.get(frame.url) || load(frame.url);
             cache.set(frame.url, map);
         }
         if (!map) return;
