@@ -1,0 +1,39 @@
+#!/usr/bin/env node
+import {spawnSync} from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+
+const HELP = `usage: flamebearer-node [node-args...] script [script-args...] [-- flamebearer-args...]
+
+Profiles a node script and renders the result with flamebearer.
+
+examples:
+  flamebearer-node bench.js
+  flamebearer-node bench.js arg1 arg2
+  flamebearer-node bench.js -- --top 20 --thread main`;
+
+const argv = process.argv.slice(2);
+if (!argv.length || argv[0] === '--help' || argv[0] === '-h') {
+    console.log(HELP);
+    process.exit(argv.length ? 0 : 1);
+}
+
+const sep = argv.indexOf('--');
+const nodeArgs = sep === -1 ? argv : argv.slice(0, sep);
+const flameArgs = sep === -1 ? [] : argv.slice(sep + 1);
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'flamebearer-'));
+try {
+    const node = spawnSync(process.execPath,
+        ['--cpu-prof', `--cpu-prof-dir=${tmp}`, ...nodeArgs],
+        {stdio: 'inherit'});
+
+    const flamebearerBin = fileURLToPath(new URL('./flamebearer', import.meta.url));
+    const flame = spawnSync(flamebearerBin, [tmp, ...flameArgs], {stdio: 'inherit'});
+
+    process.exit(node.status || flame.status || 0);
+} finally {
+    fs.rmSync(tmp, {recursive: true, force: true});
+}

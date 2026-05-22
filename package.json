@@ -4,7 +4,10 @@
   "description": "A CLI for analyzing performance traces for AI agents and humans",
   "main": "index.js",
   "type": "module",
-  "bin": "./bin/flamebearer",
+  "bin": {
+    "flamebearer": "./bin/flamebearer",
+    "flamebearer-node": "./bin/flamebearer-node"
+  },
   "files": [
     "bin",
     "index.js"
