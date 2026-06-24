@@ -17,8 +17,8 @@
     "url": "https://github.com/mapbox/flamebearer.git"
   },
   "devDependencies": {
-    "eslint": "^10.4.0",
-    "eslint-config-mourner": "^4.1.0"
+    "eslint": "^10.5.0",
+    "eslint-config-mourner": "^5.0.1"
   },
   "scripts": {
     "pretest": "eslint",
