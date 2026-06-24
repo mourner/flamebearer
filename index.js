@@ -282,8 +282,29 @@ export function resolveSourceMaps(trace, {load = loadSiblingMap} = {}) {
         }
     };
 
+    // positionTicks give self-time sample counts per generated-code line. They reference the
+    // node's (pre-remap) script url, so resolve them against the same map before remap()
+    // rewrites callFrame.url to the original source. Lines are 1-based, like the map expects.
+    const remapLineTicks = (node) => {
+        const ticks = node.positionTicks;
+        if (!ticks) return;
+        const url = node.callFrame?.url;
+        let map;
+        if (url) {
+            map = cache.get(url);
+            if (map === undefined) { map = embedded?.get(url) || load(url); cache.set(url, map); }
+        }
+        node.lineTicks = ticks.map(({line, ticks: count}) => {
+            if (map) {
+                const pos = originalPositionFor(map, {line, column: 0});
+                if (pos.source && pos.line != null) return {url: pos.source, line: pos.line, ticks: count};
+            }
+            return {url, line, ticks: count};
+        });
+    };
+
     for (const t of trace.threads) {
-        if (t.nodes) for (const n of t.nodes.values()) remap(n.callFrame);
+        if (t.nodes) for (const n of t.nodes.values()) { remapLineTicks(n); remap(n.callFrame); }
         else {
             for (const e of t.top) remap(e.frame);
             if (t.longTasks) for (const lt of t.longTasks) remap(lt.dominant);
@@ -316,6 +337,39 @@ function addFrame(map, frame, time, id) {
     } else {
         map.set(key, id !== undefined ? {frame, time, ids: [id]} : {frame, time});
     }
+}
+
+// Per-line self-time for a node: prefer sourcemap-resolved lineTicks (set by resolveSourceMaps),
+// fall back to raw positionTicks against the generated url when source maps are off/absent.
+function nodeLineTicks(node) {
+    if (node.lineTicks) return node.lineTicks;
+    if (!node.positionTicks) return null;
+    const url = node.callFrame?.url;
+    return node.positionTicks.map(({line, ticks}) => ({url, line, ticks}));
+}
+
+// Distribute each node's self time across its source lines in proportion to positionTicks,
+// then aggregate by (url, line) across all matching nodes. Surfaces hot lines even when the
+// real work is inlined into the function (the inlined ticks land on the outer function's node).
+function buildHotLines(thread, ids) {
+    const {nodes, nodeSelfTime} = thread;
+    const byLine = new Map();
+    for (const id of ids) {
+        const lines = nodeLineTicks(nodes.get(id));
+        if (!lines) continue;
+        const selfUs = nodeSelfTime.get(id) ?? 0;
+        let totalTicks = 0;
+        for (const l of lines) totalTicks += l.ticks;
+        if (!totalTicks || !selfUs) continue;
+        for (const {url, line, ticks} of lines) {
+            const key = `${url}|${line}`;
+            const time = selfUs * ticks / totalTicks;
+            const e = byLine.get(key);
+            if (e) e.time += time;
+            else byLine.set(key, {url, line, time});
+        }
+    }
+    return [...byLine.values()];
 }
 
 const SYSTEM_NAMES = new Set(['(idle)', '(program)', '(root)', '(no symbol)', '(garbage collector)']);
@@ -399,7 +453,7 @@ export function findStacks(thread, pattern) {
         let g = groups.get(key);
         if (!g) {
             g = {frame: n.callFrame, self: 0, total: 0, sites: 0,
-                callers: new Map(), callees: new Map(), matchingIds: [], hotPath: []};
+                callers: new Map(), callees: new Map(), matchingIds: [], hotPath: [], hotLines: []};
             groups.set(key, g);
         }
         const nTotal = totalOf(n.id);
@@ -420,6 +474,9 @@ export function findStacks(thread, pattern) {
     const sortDesc = m => [...m.values()].filter(e => e.time >= noiseUs).sort((a, b) => b.time - a.time);
     for (const g of groups.values()) {
         g.hotPath = buildHotTree(thread, g.matchingIds, g.total * 0.05, totalOf);
+        g.hotLines = buildHotLines(thread, g.matchingIds)
+            .filter(e => e.time >= g.self * 0.02)
+            .sort((a, b) => b.time - a.time);
         g.callers = sortDesc(g.callers);
         g.callees = sortDesc(g.callees);
         delete g.matchingIds;
@@ -640,6 +697,9 @@ function disambiguateThreadNames(threads) {
 }
 
 const TOP_CPU_FLOOR_PCT = 0.5;
+// Default-view hot lines are an at-a-glance headline, not the full list — the long 0.5%-floor
+// tail mostly echoes Top CPU for non-inlined code. Drill in with --stacks for the complete set.
+const HOT_LINES_TOP = 10;
 
 export function formatReport(input, {top = 20, color = false, sourceMaps = true, from, to, threads, stacks} = {}) {
     let trace = Array.isArray(input) ? mergeTraces(input) : input;
@@ -656,6 +716,15 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
 
     const stackResults = stacks ? trace.threads.map(t => findStacks(t, stacks)) : null;
     const heaviestResults = stacks ? null : trace.threads.map(t => topPaths(t));
+    // Thread-wide hot source lines: the one lens that survives inlining (inlined ticks land on
+    // the outer function's node, so they surface here even when the call tree hides them).
+    // Empty for trace inputs, which carry no positionTicks.
+    const hotLinesResults = stacks ? null : trace.threads.map((t) => {
+        if (!t.nodes) return [];
+        return buildHotLines(t, [...t.nodes.keys()])
+            .filter(e => e.time >= t.busy * TOP_CPU_FLOOR_PCT / 100)
+            .sort((a, b) => b.time - a.time);
+    });
     const urlCounts = new Map();
     const countUrl = (url) => { if (url) urlCounts.set(url, (urlCounts.get(url) || 0) + 1); };
     for (let i = 0; i < trace.threads.length; i++) {
@@ -665,9 +734,11 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
                 countUrl(g.frame.url);
                 for (const e of g.callers.slice(0, top)) countUrl(e.frame.url);
                 for (const e of g.callees.slice(0, top)) countUrl(e.frame.url);
+                for (const e of g.hotLines.slice(0, top)) countUrl(e.url);
             }
         } else {
             for (let j = 0; j < Math.min(top, t.top.length); j++) countUrl(t.top[j].frame.url);
+            for (const e of hotLinesResults[i].slice(0, HOT_LINES_TOP)) countUrl(e.url);
             if (t.longTasks) for (const lt of t.longTasks) countUrl(lt.dominant?.url);
         }
     }
@@ -701,6 +772,16 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
                 if (g.hotPath?.length) {
                     out.push(`${paint('  Hot paths:', 'bold')} ${paint('(% of fn total)', 'dim')}`);
                     renderHotTree(out, g.hotPath, g.total, paint, '    ');
+                }
+                if (g.hotLines?.length) {
+                    out.push(`${paint('  Hot lines:', 'bold')} ${paint('(self time by source line; includes inlined code)', 'dim')}`);
+                    const shown = g.hotLines.slice(0, top);
+                    const rows = shown.map(({url, line, time}) => [
+                        fmtMs(time),
+                        fmtPct(totalUs > 0 ? 100 * time / totalUs : 0),
+                        paint(`${url ? (shorten ? shorten(url) : url) : '(unknown)'}:${line}`, 'dim')
+                    ]);
+                    for (const l of table(rows, ['right', 'right', 'left'], {indent: '   '})) out.push(l);
                 }
                 const section = (label, entries) => {
                     if (!entries.length) return;
@@ -756,6 +837,18 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
             topRows.push([fmtMs(time), fmtPct(pct), formatFrame(frame, shorten, paint)]);
         }
         for (const line of table(topRows, ['right', 'right', 'left'])) out.push(line);
+
+        const hotLines = hotLinesResults[ti];
+        if (hotLines.length) {
+            out.push('');
+            out.push(`${paint('Hot lines (self time):', 'bold')} ${paint('(per source line; includes inlined code)', 'dim')}`);
+            const rows = hotLines.slice(0, HOT_LINES_TOP).map(({url, line, time}) => [
+                fmtMs(time),
+                fmtPct(totalUs > 0 ? 100 * time / totalUs : 0),
+                paint(`${url ? (shorten ? shorten(url) : url) : '(unknown)'}:${line}`, 'dim')
+            ]);
+            for (const l of table(rows, ['right', 'right', 'left'])) out.push(l);
+        }
 
         if (t.longTasks?.length) {
             out.push('');

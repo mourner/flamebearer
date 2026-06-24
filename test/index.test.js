@@ -344,14 +344,49 @@ test('findStacks for (garbage collector) attributes via temporally preceding JS 
     assert.equal(g.callers.reduce((s, c) => s + c.time, 0), 3000);
 });
 
+test('findStacks attributes self time to source lines via positionTicks (incl. inlined)', () => {
+    // mid is sampled directly (self time) at two call sites; each node carries positionTicks
+    // distributing that self time across generated-code lines. Lines aggregate by (url, line)
+    // across both sites — line 10 is hot because inlined work landed on it at both sites.
+    const profile = {
+        nodes: [
+            {id: 1, callFrame: {functionName: '(root)', url: '', lineNumber: -1, columnNumber: -1}, children: [2, 4]},
+            {id: 2, callFrame: {functionName: 'outer', url: 'a.js', lineNumber: 0, columnNumber: 0}, children: [3]},
+            {id: 3, callFrame: {functionName: 'mid', url: 'a.js', lineNumber: 5, columnNumber: 0},
+                positionTicks: [{line: 10, ticks: 3}, {line: 11, ticks: 1}]},
+            {id: 4, callFrame: {functionName: 'other', url: 'a.js', lineNumber: 1, columnNumber: 0}, children: [5]},
+            {id: 5, callFrame: {functionName: 'mid', url: 'a.js', lineNumber: 5, columnNumber: 0},
+                positionTicks: [{line: 10, ticks: 1}]}
+        ],
+        samples: [3, 5], // both samples hit mid nodes directly (self time)
+        timeDeltas: [4000, 2000],
+        startTime: 0
+    };
+    const t = parseCpuProfile(profile, 'tt');
+    const g = findStacks(t, 'mid')[0];
+    assert.equal(g.self, 6000);
+
+    // node 3: 4000us over ticks {10:3, 11:1} -> line10 3000, line11 1000
+    // node 5: 2000us over ticks {10:1}       -> line10 2000
+    const lines = Object.fromEntries(g.hotLines.map(l => [l.line, l.time]));
+    assert.deepEqual(lines, {10: 5000, 11: 1000});
+    // Sorted desc; the dominant line is first.
+    assert.equal(g.hotLines[0].line, 10);
+    assert.equal(g.hotLines[0].url, 'a.js');
+});
+
 test('formatReport runs on both fixture types and includes key sections', () => {
     const cpuBuf = fs.readFileSync('test/fixtures/CPU.20260521.185552.92535.0.001.cpuprofile');
     const traceBuf = fs.readFileSync('test/fixtures/Trace-20260521T190407.json.gz');
 
     const cpuReport = formatReport(parseInput(cpuBuf, 'test/fixtures/CPU.20260521.185552.92535.0.001.cpuprofile'));
     assert.match(cpuReport, /Top CPU \(self time\):/);
+    // .cpuprofile carries positionTicks, so the default view shows the hot-lines section.
+    assert.match(cpuReport, /Hot lines \(self time\):/);
 
     const traceReport = formatReport(parseInput(traceBuf, 'test/fixtures/Trace-20260521T190407.json.gz'));
     assert.match(traceReport, /=== CrRendererMain ===/);
     assert.match(traceReport, /Top CPU \(self time\):/);
+    // Chrome traces have no positionTicks, so the hot-lines section is omitted entirely.
+    assert.doesNotMatch(traceReport, /Hot lines/);
 });

@@ -15,7 +15,8 @@ filtering:
   --top <N>             max Top CPU rows per thread (default 20; rows below
                         0.5% of thread busy time are always dropped)
   --stacks <name>       drill into a function by exact name (case-insensitive):
-                        callers, callees, and dominant descendant path.
+                        callers, callees, dominant descendant path, and hot
+                        source lines (self time per line, incl. inlined code).
                         Same name in multiple files = one block per file.
 
 output:
