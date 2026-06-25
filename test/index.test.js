@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {TraceMap} from '@jridgewell/trace-mapping';
-import {parseInput, parseTrace, parseCpuProfile, buildShortener, formatReport, resolveSourceMaps, findStacks, topPaths} from '../index.js';
+import {parseInput, parseTrace, parseCpuProfile, buildShortener, formatReport, resolveSourceMaps, findStacks, topPaths, suggestNames} from '../index.js';
 
 const tinyCpuProfile = {
     nodes: [
@@ -228,6 +228,32 @@ test('findStacks aggregates callers and callees of matching frames', () => {
     assert.equal(findStacks(t, 'MID').length, 1);
     assert.deepEqual(findStacks(t, 'mi'), []);
     assert.deepEqual(findStacks(t, 'nonexistent'), []);
+});
+
+test('suggestNames returns nearest names for a missed --stacks query', () => {
+    const profile = {
+        nodes: [
+            {id: 1, callFrame: {functionName: '(root)', url: '', lineNumber: -1, columnNumber: -1}, children: [2, 3, 4]},
+            {id: 2, callFrame: {functionName: 'withinInto', url: 'a.js', lineNumber: 0, columnNumber: 0}},
+            {id: 3, callFrame: {functionName: 'sqDist', url: 'a.js', lineNumber: 1, columnNumber: 0}},
+            {id: 4, callFrame: {functionName: '(anonymous)', url: 'a.js', lineNumber: 2, columnNumber: 0}}
+        ],
+        samples: [2, 3, 4],
+        timeDeltas: [1000, 1000, 1000],
+        startTime: 0
+    };
+    const trace = {threads: [parseCpuProfile(profile, 'tt')]};
+
+    // substring near-miss surfaces the containing name
+    assert.deepEqual(suggestNames(trace, 'within'), ['withinInto']);
+    // typo within edit-distance budget
+    assert.deepEqual(suggestNames(trace, 'sqdis'), ['sqDist']);
+    // system frames and (anonymous) are never suggested; gibberish yields nothing
+    assert.deepEqual(suggestNames(trace, 'zzzqqq'), []);
+
+    // end-to-end: the no-match report says it's a miss and names the closest
+    const report = formatReport(trace, {stacks: 'within'});
+    assert.match(report, /no exact match for "within"; closest: withinInto/);
 });
 
 test('topPaths builds a heaviest-stacks tree rooted at real (non-system) entries', () => {

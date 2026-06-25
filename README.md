@@ -73,11 +73,11 @@ Hot lines (self time): (per source line; includes inlined code)
 ### Drilling down
 
 ```bash
-flamebearer trace.json --stacks parseConfig   # callers, callees, hot paths, and hot lines for one function
+flamebearer trace.json --stacks load          # summary for a specific function
 flamebearer trace.json --thread main --top 30 # restrict threads, more rows
 flamebearer trace.json --from 1200 --to 1800  # slice a time range (ms)
 
-flamebearer-node bench.js arg1 arg2 -- --top 30 --thread main # pass drilldown flags to the Node wrapper
+flamebearer-node bench.js arg1 -- --stacks load # pass drilldown flags to the Node wrapper
 ```
 
 Run `flamebearer --help` for the full flag list.

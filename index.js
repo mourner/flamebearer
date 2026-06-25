@@ -429,6 +429,54 @@ export function topPaths(thread, {cutoffPct = 5, maxDepth = 10, maxBranch = 3, b
     return buildHotTree(thread, systemParents(thread), cutoff, totalsCache(thread), {maxDepth, maxBranch, budget});
 }
 
+// Levenshtein edit distance, capped early — names are short so a full DP table is cheap.
+function editDistance(a, b) {
+    const m = a.length, n = b.length;
+    if (!m) return n;
+    if (!n) return m;
+    let prev = Array.from({length: n + 1}, (_, j) => j);
+    let cur = new Array(n + 1);
+    for (let i = 1; i <= m; i++) {
+        cur[0] = i;
+        for (let j = 1; j <= n; j++) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+        }
+        [prev, cur] = [cur, prev];
+    }
+    return prev[n];
+}
+
+// Nearest displayed function names to a missed --stacks query, ranked by relevance: substring
+// hits first (the common near-miss), then by edit distance, tie-broken by self time so hot
+// functions win. Powers the no-match hint so an agent's mistyped name answers in one round-trip.
+export function suggestNames(trace, pattern, limit = 3) {
+    const needle = pattern.toLowerCase();
+    const byName = new Map();
+    for (const t of trace.threads) {
+        if (!t.nodes) continue;
+        for (const n of t.nodes.values()) {
+            const f = n.callFrame;
+            if (!f) continue;
+            const name = f.functionName || '(anonymous)';
+            if (SYSTEM_NAMES.has(name) || name === '(anonymous)') continue;
+            const self = (t.nodeSelfTime?.get(n.id) ?? 0);
+            byName.set(name, (byName.get(name) ?? 0) + self);
+        }
+    }
+    const scored = [];
+    for (const [name, self] of byName) {
+        const lower = name.toLowerCase();
+        const dist = editDistance(needle, lower);
+        const substring = lower.includes(needle) || needle.includes(lower);
+        // skip names that are neither a substring relation nor reasonably close
+        if (!substring && dist > Math.max(2, Math.ceil(needle.length / 2))) continue;
+        scored.push({name, self, substring, dist});
+    }
+    scored.sort((a, b) => (b.substring - a.substring) || (a.dist - b.dist) || (b.self - a.self));
+    return scored.slice(0, limit).map(s => s.name);
+}
+
 export function findStacks(thread, pattern) {
     const {nodes, nodeParent, nodeChildren, nodeSelfTime} = thread;
     if (!nodes) return [];
@@ -752,6 +800,16 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
             sources.map(({tag, prefix}) => [tag ? `[${tag}]` : '', paint(prefix, 'dim')]) :
             sources.map(({prefix}) => [paint(prefix, 'dim')]);
         for (const line of table(rows, hasTags ? ['left', 'left'] : ['left'])) out.push(line);
+    }
+
+    if (stacks && !stackResults.some(g => g.length)) {
+        // Principle 7: a silent empty report reads as "function isn't hot." Say it's a miss,
+        // and answer the likely near-miss in the same round-trip.
+        const suggestions = suggestNames(trace, stacks);
+        out.push(suggestions.length ?
+            `no exact match for "${stacks}"; closest: ${suggestions.join(', ')}` :
+            `no exact match for "${stacks}"`);
+        return out.join('\n');
     }
 
     for (let ti = 0; ti < trace.threads.length; ti++) {
