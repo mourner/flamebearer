@@ -351,25 +351,65 @@ function nodeLineTicks(node) {
 // Distribute each node's self time across its source lines in proportion to positionTicks,
 // then aggregate by (url, line) across all matching nodes. Surfaces hot lines even when the
 // real work is inlined into the function (the inlined ticks land on the outer function's node).
-function buildHotLines(thread, ids) {
+export function buildHotLines(thread, ids) {
     const {nodes, nodeSelfTime} = thread;
     const byLine = new Map();
     for (const id of ids) {
-        const lines = nodeLineTicks(nodes.get(id));
+        const node = nodes.get(id);
+        const lines = nodeLineTicks(node);
         if (!lines) continue;
         const selfUs = nodeSelfTime.get(id) ?? 0;
         let totalTicks = 0;
         for (const l of lines) totalTicks += l.ticks;
         if (!totalTicks || !selfUs) continue;
+        const fnName = node.callFrame?.functionName || '(anonymous)';
         for (const {url, line, ticks} of lines) {
             const key = `${url}|${line}`;
             const time = selfUs * ticks / totalTicks;
-            const e = byLine.get(key);
-            if (e) e.time += time;
-            else byLine.set(key, {url, line, time});
+            let e = byLine.get(key);
+            if (!e) byLine.set(key, e = {url, line, time, fns: new Set()});
+            else e.time += time;
+            e.fns.add(fnName);
         }
     }
+    // A source line "owns" by the function whose declaration most closely precedes it. When a
+    // node of a *different* function carries ticks for that line, the owning function's code was
+    // inlined into that node — flag which functions it was inlined into.
+    const owners = functionOwners(thread);
+    for (const e of byLine.values()) {
+        // Without a url we can't locate the owning function, so don't speculate about inlining.
+        e.owner = e.url ? lineOwner(owners, e.url, e.line) : null;
+        e.inlinedInto = e.url ? [...e.fns].filter(n => n !== e.owner && n !== '(anonymous)') : [];
+    }
     return [...byLine.values()];
+}
+
+// Per-url sorted list of function declaration lines, cached on the thread. Powers lineOwner.
+function functionOwners(thread) {
+    if (thread._fnOwners) return thread._fnOwners;
+    const byUrl = new Map();
+    for (const n of thread.nodes.values()) {
+        const f = n.callFrame;
+        if (!f?.url || !(f.lineNumber >= 0)) continue;
+        const name = f.functionName || '(anonymous)';
+        if (name === '(anonymous)') continue;
+        let arr = byUrl.get(f.url);
+        if (!arr) byUrl.set(f.url, arr = []);
+        arr.push({line: f.lineNumber + 1, name});
+    }
+    for (const arr of byUrl.values()) arr.sort((a, b) => a.line - b.line);
+    return (thread._fnOwners = byUrl);
+}
+
+// The function whose declaration most closely precedes a source line (its natural owner).
+function lineOwner(owners, url, line) {
+    const arr = owners.get(url);
+    if (!arr) return null;
+    let owner = null;
+    for (const {line: dl, name} of arr) {
+        if (dl <= line) owner = name; else break;
+    }
+    return owner;
 }
 
 const SYSTEM_NAMES = new Set(['(idle)', '(program)', '(root)', '(no symbol)', '(garbage collector)']);
@@ -749,6 +789,21 @@ const TOP_CPU_FLOOR_PCT = 0.5;
 // tail mostly echoes Top CPU for non-inlined code. Drill in with --stacks for the complete set.
 const HOT_LINES_TOP = 10;
 
+// A hot-line label: the line is the primary key, the function(s) V8 charged the samples to
+// follow as a colored hint (like Top CPU, the hint floats after the location, not column-aligned).
+// An inlined line ran inside a function it isn't declared in, so it's marked "(inlined)" — the
+// named function is the inlining host (we can't name the source function; it may never be sampled
+// as its own node).
+function hotLineLabel(e, shorten, paint) {
+    const loc = paint(`${e.url ? (shorten ? shorten(e.url) : e.url) : '(unknown)'}:${e.line}`, 'dim');
+    const names = [...e.fns].filter(n => n && n !== '(anonymous)');
+    const shown = names.slice(0, 3);
+    let hint = shown.map(n => paint(n, KIND_COLORS[frameKind({functionName: n, url: e.url})])).join(', ');
+    if (names.length > shown.length) hint += `, +${names.length - shown.length}`;
+    if (e.inlinedInto.length) hint += `${hint ? ' ' : ''}${paint('(inlined)', 'dim')}`;
+    return hint ? `${loc}  ${hint}` : loc;
+}
+
 export function formatReport(input, {top = 20, color = false, sourceMaps = true, from, to, threads, stacks} = {}) {
     let trace = Array.isArray(input) ? mergeTraces(input) : input;
     disambiguateThreadNames(trace.threads);
@@ -834,10 +889,10 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
                 if (g.hotLines?.length) {
                     out.push(`${paint('  Hot lines:', 'bold')} ${paint('(self time by source line; includes inlined code)', 'dim')}`);
                     const shown = g.hotLines.slice(0, top);
-                    const rows = shown.map(({url, line, time}) => [
-                        fmtMs(time),
-                        fmtPct(totalUs > 0 ? 100 * time / totalUs : 0),
-                        paint(`${url ? (shorten ? shorten(url) : url) : '(unknown)'}:${line}`, 'dim')
+                    const rows = shown.map(e => [
+                        fmtMs(e.time),
+                        fmtPct(totalUs > 0 ? 100 * e.time / totalUs : 0),
+                        hotLineLabel(e, shorten, paint)
                     ]);
                     for (const l of table(rows, ['right', 'right', 'left'], {indent: '   '})) out.push(l);
                 }
@@ -900,10 +955,10 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
         if (hotLines.length) {
             out.push('');
             out.push(`${paint('Hot lines (self time):', 'bold')} ${paint('(per source line; includes inlined code)', 'dim')}`);
-            const rows = hotLines.slice(0, HOT_LINES_TOP).map(({url, line, time}) => [
-                fmtMs(time),
-                fmtPct(totalUs > 0 ? 100 * time / totalUs : 0),
-                paint(`${url ? (shorten ? shorten(url) : url) : '(unknown)'}:${line}`, 'dim')
+            const rows = hotLines.slice(0, HOT_LINES_TOP).map(e => [
+                fmtMs(e.time),
+                fmtPct(totalUs > 0 ? 100 * e.time / totalUs : 0),
+                hotLineLabel(e, shorten, paint)
             ]);
             for (const l of table(rows, ['right', 'right', 'left'])) out.push(l);
         }

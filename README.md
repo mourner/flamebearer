@@ -20,7 +20,7 @@ flamebearer CPU.*.cpuprofile # summarize node --cpu-prof trace (one or more file
 With no flags, you get a one-page summary per thread — the answer to “what should I look at in this trace”.
 
 <details>
-<summary>Sample output</summary>
+<summary><b>Sample output</b></summary>
 
 ```
 Sources:
@@ -51,16 +51,16 @@ Top CPU (self time):
    27.1 ms   0.5%  load  index.js:44
 
 Hot lines (self time): (per source line; includes inlined code)
- 711.3 ms  13.4%  node_modules/kdbush/index.js:241
- 710.1 ms  13.4%  node_modules/kdbush/index.js:227
- 373.0 ms   7.0%  node_modules/kdbush/index.js:315
- 331.0 ms   6.2%  node_modules/kdbush/index.js:226
- 311.1 ms   5.9%  node_modules/kdbush/index.js:314
- 310.6 ms   5.8%  node_modules/kdbush/index.js:360
- 279.2 ms   5.3%  node_modules/kdbush/index.js:244
- 109.8 ms   2.1%  node_modules/kdbush/index.js:359
- 109.8 ms   2.1%  node_modules/kdbush/index.js:361
-  84.4 ms   1.6%  index.js:379
+ 711.3 ms  13.4%  node_modules/kdbush/index.js:241  withinInto
+ 710.1 ms  13.4%  node_modules/kdbush/index.js:227  withinInto
+ 373.0 ms   7.0%  node_modules/kdbush/index.js:315  select
+ 331.0 ms   6.2%  node_modules/kdbush/index.js:226  withinInto
+ 311.1 ms   5.9%  node_modules/kdbush/index.js:314  select
+ 310.6 ms   5.8%  node_modules/kdbush/index.js:360  sqDist
+ 279.2 ms   5.3%  node_modules/kdbush/index.js:244  withinInto
+ 109.8 ms   2.1%  node_modules/kdbush/index.js:359  sqDist
+ 109.8 ms   2.1%  node_modules/kdbush/index.js:361  sqDist
+  84.4 ms   1.6%  index.js:379  _cluster
 ```
 
 </details>

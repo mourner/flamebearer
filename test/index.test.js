@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {TraceMap} from '@jridgewell/trace-mapping';
-import {parseInput, parseTrace, parseCpuProfile, buildShortener, formatReport, resolveSourceMaps, findStacks, topPaths, suggestNames} from '../index.js';
+import {parseInput, parseTrace, parseCpuProfile, buildShortener, formatReport, resolveSourceMaps, findStacks, topPaths, suggestNames, buildHotLines} from '../index.js';
 
 const tinyCpuProfile = {
     nodes: [
@@ -399,6 +399,44 @@ test('findStacks attributes self time to source lines via positionTicks (incl. i
     // Sorted desc; the dominant line is first.
     assert.equal(g.hotLines[0].line, 10);
     assert.equal(g.hotLines[0].url, 'a.js');
+});
+
+test('hot lines flag the functions a source line was inlined into', () => {
+    // cosDist's body (a.js:50) executes only inlined into two callers declared *below* it.
+    // Neither caller can own line 50 (both declared after it), so line 50 is reported as
+    // inlined into both. The callers' own body lines are not flagged.
+    // `helper` is declared at line 10 and sampled (so it lands in the declaration map), but the
+    // *source owner* of line 50 — cosDist — is always inlined and never sampled as its own node.
+    // The closest-preceding-declaration heuristic would mis-name line 50's owner as `helper`; the
+    // code must not show that guess, only which functions line 50 was actually inlined into.
+    const profile = {
+        nodes: [
+            {id: 1, callFrame: {functionName: '(root)', url: '', lineNumber: -1, columnNumber: -1}, children: [2, 3, 4]},
+            {id: 2, callFrame: {functionName: 'helper', url: 'a.js', lineNumber: 9, columnNumber: 0},
+                positionTicks: [{line: 11, ticks: 1}]},
+            {id: 3, callFrame: {functionName: 'boxNegCosDist', url: 'a.js', lineNumber: 99, columnNumber: 0},
+                positionTicks: [{line: 50, ticks: 3}, {line: 101, ticks: 1}]},
+            {id: 4, callFrame: {functionName: 'boxNegCosFarDist', url: 'a.js', lineNumber: 199, columnNumber: 0},
+                positionTicks: [{line: 50, ticks: 2}]}
+        ],
+        samples: [2, 3, 4],
+        timeDeltas: [10000, 40000, 20000],
+        startTime: 0
+    };
+    const t = parseCpuProfile(profile, 'tt');
+    const byLine = Object.fromEntries(
+        buildHotLines(t, [...t.nodes.keys()]).map(l => [l.line, l.inlinedInto]));
+    // line 50: attributed to both callers, neither declared at/above it -> inlined into both
+    assert.deepEqual(byLine[50].sort(), ['boxNegCosDist', 'boxNegCosFarDist']);
+    // line 101: owned by boxNegCosDist (declared at 100, at/above the line) -> not inlined
+    assert.deepEqual(byLine[101], []);
+
+    // The default report shows the line, the inlining host(s), and the (inlined) marker...
+    const report = formatReport({threads: [t]});
+    assert.match(report, /a\.js:50\s+boxNegCosDist, boxNegCosFarDist \(inlined\)/);
+    // ...and must NOT mis-label the inlined line with the heuristic's wrong guess (`helper`).
+    const line50 = report.split('\n').find(l => l.includes('a.js:50'));
+    assert.doesNotMatch(line50, /helper/);
 });
 
 test('formatReport runs on both fixture types and includes key sections', () => {
