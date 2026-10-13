@@ -84,7 +84,7 @@ export function parseTrace(data) {
         if (events) {
             t.events = events;
             t.longTasks = findLongTasks(events, t);
-            t.breakdown = computeBreakdown(events, t.busy);
+            Object.assign(t, computeBreakdown(events));
         }
         threads.push(t);
     }
@@ -239,10 +239,14 @@ function categorize(name) {
     return 'other';
 }
 
-function computeBreakdown(events, busyUs) {
+// Self time per category from trace events, plus the time events cover at all. Event time and
+// sample time are different clocks (e.g. compile runs in (program) samples, which count as idle),
+// so the breakdown is reported in ms against taskTime rather than as a share of sample busy.
+function computeBreakdown(events) {
     const sorted = [...events].sort((a, b) => a.ts - b.ts || b.dur - a.dur);
     const buckets = new Map();
     const stack = [];
+    let taskTime = 0, coveredTo = -Infinity;
 
     const close = (f) => {
         const self = f.dur - f.childDur;
@@ -251,16 +255,22 @@ function computeBreakdown(events, busyUs) {
     };
 
     for (const e of sorted) {
+        const end = e.ts + e.dur;
+        if (end > coveredTo) {
+            taskTime += end - Math.max(e.ts, coveredTo);
+            coveredTo = end;
+        }
         while (stack.length && stack[stack.length - 1].end <= e.ts) close(stack.pop());
         const parent = stack[stack.length - 1];
         if (parent) parent.childDur += e.dur;
-        stack.push({end: e.ts + e.dur, dur: e.dur, childDur: 0, name: e.name});
+        stack.push({end, dur: e.dur, childDur: 0, name: e.name});
     }
     while (stack.length) close(stack.pop());
 
-    return [...buckets.entries()]
-        .map(([category, time]) => ({category, time, pct: busyUs > 0 ? 100 * time / busyUs : 0}))
+    const breakdown = [...buckets.entries()]
+        .map(([category, time]) => ({category, time}))
         .sort((a, b) => b.time - a.time);
+    return {taskTime, breakdown};
 }
 
 export function filterTrace(trace, {from, to, threads} = {}) {
@@ -282,10 +292,8 @@ export function filterTrace(trace, {from, to, threads} = {}) {
 function sliceThread(t, fromUs, toUs) {
     const agg = aggregate(t.sampleTimes, t.sampleFrames, t.startTime, fromUs, toUs);
     const longTasks = t.longTasks?.filter(lt => lt.ts >= fromUs && lt.ts + lt.dur <= toUs);
-    const breakdown = t.events ?
-        computeBreakdown(t.events.filter(e => e.ts >= fromUs && e.ts + e.dur <= toUs), agg.busy) :
-        t.breakdown;
-    return {...t, ...agg, longTasks, breakdown};
+    const tasks = t.events ? computeBreakdown(t.events.filter(e => e.ts >= fromUs && e.ts + e.dur <= toUs)) : {};
+    return {...t, ...agg, longTasks, ...tasks};
 }
 
 export function resolveSourceMaps(trace, {load = loadSiblingMap} = {}) {
@@ -975,8 +983,8 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
         out.push(paint(`=== ${t.name} ===`, 'bold'));
 
         const breakdownParts = t.breakdown
-            ?.filter(b => BREAKDOWN_KEEP.has(b.category) && b.pct >= 1)
-            .map(b => `${b.category} ${b.pct.toFixed(1)}%`) || [];
+            ?.filter(b => BREAKDOWN_KEEP.has(b.category) && b.time >= t.taskTime * 0.01)
+            .map(b => `${b.category} ${fmtMs(b.time)}`) || [];
         const busyPct = pctOf(t.busy, totalUs);
         let statsLine = `samples: ${t.samples}  busy: ${busyMs.toFixed(1)} ms (${busyPct.toFixed(1)}%)  idle: ${idleMs.toFixed(1)} ms`;
         // Idle head / tail (typical of a manually captured trace): hand over --from/--to values.
@@ -984,7 +992,11 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
             const rel = us => Math.max(0, (us - t.startTime) / 1000).toFixed(0);
             statsLine += `  active: ${rel(t.activeFrom)}–${rel(t.activeTo)} ms`;
         }
-        out.push(breakdownParts.length ? `${statsLine}  (${breakdownParts.join('  ')})` : statsLine);
+        if (t.taskTime) {
+            statsLine += `  tasks: ${fmtMs(t.taskTime)}`;
+            if (breakdownParts.length) statsLine += ` (${breakdownParts.join(', ')})`;
+        }
+        out.push(statsLine);
 
         if (t.busy < IDLE_THREAD_BUSY_US || t.busy < IDLE_THREAD_BUSY_FRAC * totalUs) {
             out.push(paint('(thread idle — nothing to report)', 'dim'));

@@ -66,6 +66,7 @@ test('parseTrace links Profile + ProfileChunk and finds long tasks', () => {
     assert.equal(t.longTasks[0].dominant.functionName, 'hot');
     const gc = t.breakdown.find(b => b.category === 'gc');
     assert.ok(gc && gc.time === 1000);
+    assert.equal(t.taskTime, 60000);
 });
 
 test('buildShortener picks dominant origin and tags others', () => {
@@ -453,6 +454,8 @@ test('formatReport runs on both fixture types and includes key sections', () => 
     assert.match(traceReport, /Top CPU \(self time\):/);
     // Chrome traces carry per-sample lines in ProfileChunks, so they get hot lines too.
     assert.match(traceReport, /Hot lines \(self time\):/);
+    // Trace-event breakdown is in ms against event-covered time: compile here exceeds sample busy.
+    assert.match(traceReport, /busy: 38\.2 ms .* tasks: 130\.8 ms \(compile 52\.8 ms, loading 4\.9 ms\)/);
 });
 
 test('hot lines for Chrome traces come from per-sample ProfileChunk lines', () => {
