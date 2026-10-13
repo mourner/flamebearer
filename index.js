@@ -78,7 +78,7 @@ export function parseTrace(data) {
         if (events) {
             t.events = events;
             t.longTasks = findLongTasks(events, t);
-            t.breakdown = computeBreakdown(events, t.busy + t.idle);
+            t.breakdown = computeBreakdown(events, t.busy);
         }
         threads.push(t);
     }
@@ -130,7 +130,7 @@ function buildThread({nodes, samples, timeDeltas, startTime}, name) {
 
 function aggregate(sampleTimes, sampleFrames, startTime, fromUs, toUs) {
     const selfByFrame = new Map();
-    let busy = 0, idle = 0, samples = 0;
+    let busy = 0, idle = 0, samples = 0, activeFrom = null, activeTo = null;
     let prev = startTime;
     for (let i = 0; i < sampleTimes.length; i++) {
         const ts = sampleTimes[i];
@@ -145,6 +145,8 @@ function aggregate(sampleTimes, sampleFrames, startTime, fromUs, toUs) {
             idle += dt;
         } else {
             busy += dt;
+            activeFrom ??= ts - dt;
+            activeTo = ts;
             const key = frameKey(f);
             const entry = selfByFrame.get(key);
             if (entry) entry.time += dt;
@@ -152,7 +154,7 @@ function aggregate(sampleTimes, sampleFrames, startTime, fromUs, toUs) {
         }
     }
     const top = [...selfByFrame.values()].sort((a, b) => b.time - a.time);
-    return {samples, busy, idle, top};
+    return {samples, busy, idle, activeFrom, activeTo, top};
 }
 
 function frameKey(f) {
@@ -206,7 +208,7 @@ function categorize(name) {
     return 'other';
 }
 
-function computeBreakdown(events, totalUs) {
+function computeBreakdown(events, busyUs) {
     const sorted = [...events].sort((a, b) => a.ts - b.ts || b.dur - a.dur);
     const buckets = new Map();
     const stack = [];
@@ -226,7 +228,7 @@ function computeBreakdown(events, totalUs) {
     while (stack.length) close(stack.pop());
 
     return [...buckets.entries()]
-        .map(([category, time]) => ({category, time, pct: totalUs > 0 ? 100 * time / totalUs : 0}))
+        .map(([category, time]) => ({category, time, pct: busyUs > 0 ? 100 * time / busyUs : 0}))
         .sort((a, b) => b.time - a.time);
 }
 
@@ -250,7 +252,7 @@ function sliceThread(t, fromUs, toUs) {
     const agg = aggregate(t.sampleTimes, t.sampleFrames, t.startTime, fromUs, toUs);
     const longTasks = t.longTasks?.filter(lt => lt.ts >= fromUs && lt.ts + lt.dur <= toUs);
     const breakdown = t.events ?
-        computeBreakdown(t.events.filter(e => e.ts >= fromUs && e.ts + e.dur <= toUs), agg.busy + agg.idle) :
+        computeBreakdown(t.events.filter(e => e.ts >= fromUs && e.ts + e.dur <= toUs), agg.busy) :
         t.breakdown;
     return {...t, ...agg, longTasks, breakdown};
 }
@@ -559,8 +561,10 @@ export function findStacks(thread, pattern) {
     }
 
     const noiseUs = thread.busy * 0.01;
-    const sortDesc = m => [...m.values()].filter(e => e.time >= noiseUs).sort((a, b) => b.time - a.time);
     for (const g of groups.values()) {
+        // Floor callers / callees against the function's own total, not thread busy: a function
+        // worth drilling into is often a few % of the thread, and its parts would all vanish.
+        const sortDesc = m => [...m.values()].filter(e => e.time >= g.total * 0.02).sort((a, b) => b.time - a.time);
         g.hotPath = buildHotTree(thread, g.matchingIds, g.total * 0.05, totalOf);
         g.hotLines = buildHotLines(thread, g.matchingIds)
             .filter(e => e.time >= g.self * 0.02)
@@ -791,6 +795,8 @@ function disambiguateThreadNames(threads) {
 }
 
 const TOP_CPU_FLOOR_PCT = 0.5;
+// Report the active window when idle outside it is at least 10% of the thread's span.
+const ACTIVE_WINDOW_FRAC = 0.9;
 // Default-view hot lines are an at-a-glance headline, not the full list — the long 0.5%-floor
 // tail mostly echoes Top CPU for non-inlined code. Drill in with --stacks for the complete set.
 const HOT_LINES_TOP = 10;
@@ -822,6 +828,9 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
         return p >= hotThreshold ? paint(s, 'bold+red') : s;
     };
     const fmtMs = us => `${(us / 1000).toFixed(1)} ms`;
+    // Thread-level percentages are of busy time, never busy + idle: a manually captured trace is
+    // often mostly idle, which would shrink every row and push real work under the floor.
+    const pctOf = (us, base) => (base > 0 ? 100 * us / base : 0);
 
     const stackResults = stacks ? trace.threads.map(t => findStacks(t, stacks)) : null;
     const heaviestResults = stacks ? null : trace.threads.map(t => topPaths(t));
@@ -883,13 +892,14 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
             out.push('');
             out.push(paint(`=== ${t.name} ===`, 'bold'));
             for (const g of groups) {
-                const totalPct = totalUs > 0 ? 100 * g.total / totalUs : 0;
-                const selfPct = totalUs > 0 ? 100 * g.self / totalUs : 0;
+                const totalPct = pctOf(g.total, t.busy);
+                const selfPct = pctOf(g.self, t.busy);
                 out.push('');
                 out.push(`${paint('Stacks:', 'bold')} ${formatFrame(g.frame, shorten, paint, true)}`);
-                out.push(paint(`  ${g.sites} site${g.sites > 1 ? 's' : ''}; total ${fmtMs(g.total)} ${totalPct.toFixed(1)}%, self ${fmtMs(g.self)} ${selfPct.toFixed(1)}%`, 'dim'));
+                out.push(paint(`  ${g.sites} site${g.sites > 1 ? 's' : ''}; total ${fmtMs(g.total)} (${totalPct.toFixed(1)}% of busy), ` +
+                    `self ${fmtMs(g.self)} (${selfPct.toFixed(1)}%); % below are of fn total`, 'dim'));
                 if (g.hotPath?.length) {
-                    out.push(`${paint('  Hot paths:', 'bold')} ${paint('(% of fn total)', 'dim')}`);
+                    out.push(paint('  Hot paths:', 'bold'));
                     renderHotTree(out, g.hotPath, g.total, paint, '    ');
                 }
                 if (g.hotLines?.length) {
@@ -897,7 +907,7 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
                     const shown = g.hotLines.slice(0, top);
                     const rows = shown.map(e => [
                         fmtMs(e.time),
-                        fmtPct(totalUs > 0 ? 100 * e.time / totalUs : 0),
+                        fmtPct(pctOf(e.time, g.total)),
                         hotLineLabel(e, shorten, paint)
                     ]);
                     for (const l of table(rows, ['right', 'right', 'left'], {indent: '   '})) out.push(l);
@@ -909,7 +919,7 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
                     out.push(paint(`  ${label}:`, 'bold'));
                     const rows = shown.map(({frame, time}) => [
                         fmtMs(time),
-                        fmtPct(totalUs > 0 ? 100 * time / totalUs : 0),
+                        fmtPct(pctOf(time, g.total)),
                         formatFrame(frame, shorten, paint)
                     ]);
                     for (const line of table(rows, ['right', 'right', 'left'], {indent: '   '})) out.push(line);
@@ -930,8 +940,13 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
         const breakdownParts = t.breakdown
             ?.filter(b => BREAKDOWN_KEEP.has(b.category) && b.pct >= 1)
             .map(b => `${b.category} ${b.pct.toFixed(1)}%`) || [];
-        const busyPct = totalUs > 0 ? 100 * t.busy / totalUs : 0;
-        const statsLine = `samples: ${t.samples}  busy: ${busyMs.toFixed(1)} ms (${busyPct.toFixed(1)}%)  idle: ${idleMs.toFixed(1)} ms`;
+        const busyPct = pctOf(t.busy, totalUs);
+        let statsLine = `samples: ${t.samples}  busy: ${busyMs.toFixed(1)} ms (${busyPct.toFixed(1)}%)  idle: ${idleMs.toFixed(1)} ms`;
+        // Idle head / tail (typical of a manually captured trace): hand over --from/--to values.
+        if (t.activeFrom != null && t.activeTo - t.activeFrom < ACTIVE_WINDOW_FRAC * totalUs) {
+            const rel = us => Math.max(0, (us - t.startTime) / 1000).toFixed(0);
+            statsLine += `  active: ${rel(t.activeFrom)}–${rel(t.activeTo)} ms`;
+        }
         out.push(breakdownParts.length ? `${statsLine}  (${breakdownParts.join('  ')})` : statsLine);
 
         if (t.busy < IDLE_THREAD_BUSY_US || t.busy < IDLE_THREAD_BUSY_FRAC * totalUs) {
@@ -951,7 +966,7 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
         const topRows = [];
         for (let i = 0; i < t.top.length && topRows.length < top; i++) {
             const {frame, time} = t.top[i];
-            const pct = totalUs > 0 ? 100 * time / totalUs : 0;
+            const pct = pctOf(time, t.busy);
             if (pct < TOP_CPU_FLOOR_PCT) break;
             topRows.push([fmtMs(time), fmtPct(pct), formatFrame(frame, shorten, paint)]);
         }
@@ -963,7 +978,7 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
             out.push(`${paint('Hot lines (self time):', 'bold')} ${paint('(per source line; includes inlined code)', 'dim')}`);
             const rows = hotLines.slice(0, HOT_LINES_TOP).map(e => [
                 fmtMs(e.time),
-                fmtPct(totalUs > 0 ? 100 * e.time / totalUs : 0),
+                fmtPct(pctOf(e.time, t.busy)),
                 hotLineLabel(e, shorten, paint)
             ]);
             for (const l of table(rows, ['right', 'right', 'left'])) out.push(l);

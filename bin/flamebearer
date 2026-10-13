@@ -6,6 +6,8 @@ const HELP = `usage: flamebearer <input>... [options]
 
 Reads a CPU trace and prints a plain-text summary (top offenders,
 hot source lines, heaviest stacks) for terminals and AI agents.
+Percentages are of each thread's busy (non-idle) time; --stacks
+breakdowns are of the function's own total.
 
 inputs: .json / .json.gz Chrome trace, .cpuprofile, or a directory of
         .cpuprofile files. Multiple inputs merge as additional threads.

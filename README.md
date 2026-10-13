@@ -41,8 +41,8 @@ Heaviest stacks: (% of thread busy)
 
 Top CPU (self time):
  2511.9 ms  47.3%  withinInto  node_modules/kdbush/index.js:207
-  815.5 ms  15.3%  (garbage collector)
-  778.6 ms  14.6%  select  node_modules/kdbush/index.js:289
+  815.5 ms  15.4%  (garbage collector)
+  778.6 ms  14.7%  select  node_modules/kdbush/index.js:289
   531.6 ms  10.0%  sqDist  node_modules/kdbush/index.js:358
   316.8 ms   6.0%  _cluster  index.js:304
   109.2 ms   2.1%  swap  node_modules/kdbush/index.js:346
@@ -58,7 +58,7 @@ Hot lines (self time): (per source line; includes inlined code)
  373.0 ms   7.0%  node_modules/kdbush/index.js:315  select
  331.0 ms   6.2%  node_modules/kdbush/index.js:226  withinInto
  311.1 ms   5.9%  node_modules/kdbush/index.js:314  select
- 310.6 ms   5.8%  node_modules/kdbush/index.js:360  sqDist
+ 310.6 ms   5.9%  node_modules/kdbush/index.js:360  sqDist
  279.2 ms   5.3%  node_modules/kdbush/index.js:244  withinInto
  109.8 ms   2.1%  node_modules/kdbush/index.js:359  sqDist
  109.8 ms   2.1%  node_modules/kdbush/index.js:361  sqDist

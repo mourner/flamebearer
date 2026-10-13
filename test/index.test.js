@@ -454,3 +454,32 @@ test('formatReport runs on both fixture types and includes key sections', () => 
     // Chrome traces have no positionTicks, so the hot-lines section is omitted entirely.
     assert.doesNotMatch(traceReport, /Hot lines/);
 });
+
+test('percentages are of busy time, not busy + idle; --stacks breakdowns are of fn total', () => {
+    // Mostly idle thread: 0.9s idle head, then main -> big (90ms) + small (10ms), then 0.9s idle
+    // tail. small is 10% of busy but only 0.5% of busy + idle.
+    const profile = {
+        nodes: [
+            {id: 1, callFrame: {functionName: '(root)', url: '', lineNumber: -1, columnNumber: -1}, children: [2, 5]},
+            {id: 2, callFrame: {functionName: 'main', url: 'a.js', lineNumber: 0, columnNumber: 0}, children: [3, 4]},
+            {id: 3, callFrame: {functionName: 'big', url: 'a.js', lineNumber: 1, columnNumber: 0}},
+            {id: 4, callFrame: {functionName: 'small', url: 'a.js', lineNumber: 2, columnNumber: 0}},
+            {id: 5, callFrame: {functionName: '(idle)', url: '', lineNumber: -1, columnNumber: -1}}
+        ],
+        samples: [5, 3, 4, 5],
+        timeDeltas: [900000, 90000, 10000, 900000],
+        startTime: 0
+    };
+    const t = parseCpuProfile(profile, 'tt');
+    assert.equal(t.activeFrom, 900000);
+    assert.equal(t.activeTo, 1000000);
+
+    const report = formatReport({threads: [t]});
+    assert.match(report, /active: 900–1000 ms/);
+    assert.match(report, /90\.0 ms\s+90\.0%\s+big/);
+    assert.match(report, /10\.0 ms\s+10\.0%\s+small/);
+
+    const stacks = formatReport({threads: [t]}, {stacks: 'main'});
+    assert.match(stacks, /total 100\.0 ms \(100\.0% of busy\)/);
+    assert.match(stacks, /10\.0 ms\s+10\.0%\s+small/);
+});
