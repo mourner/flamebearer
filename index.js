@@ -2,7 +2,7 @@ import zlib from 'node:zlib';
 import path from 'node:path';
 import fs from 'node:fs';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {TraceMap, originalPositionFor} from '@jridgewell/trace-mapping';
+import {TraceMap, originalPositionFor, GREATEST_LOWER_BOUND, LEAST_UPPER_BOUND} from '@jridgewell/trace-mapping';
 
 export function parseInput(buf, filename) {
     if (buf[0] === 0x1f && buf[1] === 0x8b) buf = zlib.gunzipSync(buf);
@@ -312,15 +312,17 @@ export function resolveSourceMaps(trace, {load = loadSiblingMap} = {}) {
         }
         if (!map) return;
 
-        const pos = originalPositionFor(map, {line: frame.lineNumber + 1, column: frame.columnNumber || 0});
+        const line = frame.lineNumber + 1;
+        const column = frame.columnNumber || 0;
+        const pos = originalPositionFor(map, {line, column});
         if (!pos.source || pos.line == null) return;
 
+        const name = frame.functionName && frame.functionName !== '(anonymous)' ?
+            mappedName(map, line, column - frame.functionName.length) : pos.name;
         frame.url = pos.source;
         frame.lineNumber = pos.line - 1;
         frame.columnNumber = pos.column || 0;
-        if (pos.name && (!frame.functionName || frame.functionName === '(anonymous)')) {
-            frame.functionName = pos.name;
-        }
+        if (name) frame.functionName = name;
     };
 
     // positionTicks give self-time sample counts per generated-code line. They reference the
@@ -351,6 +353,17 @@ export function resolveSourceMaps(trace, {load = loadSiblingMap} = {}) {
             if (t.longTasks) for (const lt of t.longTasks) remap(lt.dominant);
         }
     }
+}
+
+// V8 starts a function at the `(` after its name, while bundlers map the original name onto the
+// identifier itself, so look it up just before the start. Only an exact segment counts (both
+// lookup biases agree); a nearby one would hand the function some other identifier's name.
+function mappedName(map, line, column) {
+    if (column < 0) return null;
+    const a = originalPositionFor(map, {line, column, bias: GREATEST_LOWER_BOUND});
+    if (!a.name) return null;
+    const b = originalPositionFor(map, {line, column, bias: LEAST_UPPER_BOUND});
+    return a.name === b.name && a.line === b.line && a.column === b.column ? a.name : null;
 }
 
 function totalsCache(thread) {

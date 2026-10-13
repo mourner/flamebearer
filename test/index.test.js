@@ -125,6 +125,25 @@ test('resolveSourceMaps remaps frames via injected loader', () => {
     assert.equal(lt.functionName, 'x'); // not anonymous, name preserved
 });
 
+test('resolveSourceMaps restores minified function names from the identifier before the start column', () => {
+    // generated: `function te(a){}function Z(b){}`; `te` at col 9 maps to name drawWithSegments, while Z
+    // has no name segment of its own, only an earlier one (col 16) that must not be borrowed
+    const map = new TraceMap({
+        version: 3,
+        sources: ['src/draw.ts'],
+        names: ['drawWithSegments', 'other'],
+        mappings: 'AAAA,SACSA,EAAW,KACAC'
+    }, 'file:///bundle/min.js.map');
+    const frame = (functionName, columnNumber) => ({functionName, url: 'file:///bundle/min.js', lineNumber: 0, columnNumber});
+    const trace = {threads: [{top: [{frame: frame('te', 11), time: 1}, {frame: frame('Z', 26), time: 1}]}]};
+    resolveSourceMaps(trace, {load: () => map});
+
+    const [te, z] = trace.threads[0].top.map(e => e.frame);
+    assert.equal(te.functionName, 'drawWithSegments');
+    assert.match(te.url, /draw\.ts$/);
+    assert.equal(z.functionName, 'Z');
+});
+
 test('parseTrace collects embedded sourcemaps from metadata; resolveSourceMaps applies them', () => {
     const data = {
         metadata: {
