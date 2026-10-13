@@ -46,16 +46,21 @@ export function parseTrace(data) {
                 startTime: e.args.data.startTime,
                 nodes: new Map(),
                 samples: [],
-                timeDeltas: []
+                timeDeltas: [],
+                lines: []
             });
 
         } else if (e.name === 'ProfileChunk') {
             const p = profiles.get(e.id);
             if (!p) continue;
-            const {cpuProfile, timeDeltas} = e.args.data;
+            const {cpuProfile, timeDeltas, lines} = e.args.data;
+            const samples = cpuProfile?.samples ?? [];
             for (const n of cpuProfile?.nodes ?? []) p.nodes.set(n.id, n);
-            for (const s of cpuProfile?.samples ?? []) p.samples.push(s);
+            for (const s of samples) p.samples.push(s);
             for (const d of timeDeltas ?? []) p.timeDeltas.push(d);
+            // Per-sample source lines, parallel to samples; some chunks omit them, so pad with 0
+            // (V8's "no line info") to keep the arrays aligned.
+            for (let i = 0; i < samples.length; i++) p.lines.push(lines?.[i] ?? 0);
 
         } else if (e.ph === 'X' && e.dur > 0) {
             const key = `${e.pid}:${e.tid}`;
@@ -71,6 +76,7 @@ export function parseTrace(data) {
             nodes: p.nodes,
             samples: p.samples,
             timeDeltas: p.timeDeltas,
+            lines: p.lines,
             startTime: p.startTime
         }, threadNames.get(p.key) || p.key);
 
@@ -98,7 +104,7 @@ export function parseCpuProfile(data, name) {
 
 const IDLE_SAMPLE_NAMES = new Set(['(idle)', '(program)']);
 
-function buildThread({nodes, samples, timeDeltas, startTime}, name) {
+function buildThread({nodes, samples, timeDeltas, lines, startTime}, name) {
     const sampleTimes = new Array(samples.length);
     const sampleFrames = new Array(samples.length);
     const nodeSelfTime = new Map();
@@ -112,6 +118,9 @@ function buildThread({nodes, samples, timeDeltas, startTime}, name) {
         if (node) sampleFrames[i] = node.callFrame;
         nodeSelfTime.set(id, (nodeSelfTime.get(id) ?? 0) + dt);
     }
+    if (lines) addPositionTicks(nodes, samples, lines);
+    let hasLineData = false;
+    for (const n of nodes.values()) if (n.positionTicks) { hasLineData = true; break; }
     const nodeParent = new Map();
     const nodeChildren = new Map();
     for (const n of nodes.values()) {
@@ -124,8 +133,30 @@ function buildThread({nodes, samples, timeDeltas, startTime}, name) {
         else nodeChildren.set(parent, [id]);
     }
     return {name, sampleTimes, sampleFrames, sampleIds: samples, startTime,
-        nodes, nodeParent, nodeChildren, nodeSelfTime,
+        nodes, nodeParent, nodeChildren, nodeSelfTime, hasLineData,
         ...aggregate(sampleTimes, sampleFrames, startTime, -Infinity, Infinity)};
+}
+
+// Trace profiles carry a source line per sample instead of cpuprofile's per-node positionTicks.
+// Both come from the same V8 tick symbolization (1-based, 0 = unknown), so fold the per-sample
+// lines into positionTicks and let hot lines and source map resolution treat them alike.
+function addPositionTicks(nodes, samples, lines) {
+    const byNode = new Map();
+    for (let i = 0; i < samples.length; i++) {
+        const line = lines[i];
+        if (!(line > 0)) continue;
+        let counts = byNode.get(samples[i]);
+        if (!counts) byNode.set(samples[i], counts = new Map());
+        counts.set(line, (counts.get(line) ?? 0) + 1);
+    }
+    for (const [id, counts] of byNode) {
+        const node = nodes.get(id);
+        // Native frames (postMessage, measure) get lines with no url to resolve them in, and wasm
+        // frames are always line 1 (positions are byte offsets), which merges unrelated functions.
+        const f = node?.callFrame;
+        if (!f?.url || f.codeType === 'wasm' || node.positionTicks) continue;
+        node.positionTicks = [...counts].map(([line, ticks]) => ({line, ticks}));
+    }
 }
 
 function aggregate(sampleTimes, sampleFrames, startTime, fromUs, toUs) {
@@ -381,7 +412,11 @@ export function buildHotLines(thread, ids) {
     for (const e of byLine.values()) {
         // Without a url we can't locate the owning function, so don't speculate about inlining.
         e.owner = e.url ? lineOwner(owners, e.url, e.line) : null;
-        e.inlinedInto = e.url ? [...e.fns].filter(n => n !== e.owner && n !== '(anonymous)') : [];
+        // Functions declared on the line itself are excluded too: in minified code a line holds
+        // many declarations, and any of them may own the ticks.
+        const declaredHere = new Set(owners.get(e.url)?.filter(d => d.line === e.line).map(d => d.name));
+        e.inlinedInto = e.url ?
+            [...e.fns].filter(n => n !== e.owner && n !== '(anonymous)' && !declaredHere.has(n)) : [];
     }
     return [...byLine.values()];
 }
@@ -800,6 +835,7 @@ const ACTIVE_WINDOW_FRAC = 0.9;
 // Default-view hot lines are an at-a-glance headline, not the full list — the long 0.5%-floor
 // tail mostly echoes Top CPU for non-inlined code. Drill in with --stacks for the complete set.
 const HOT_LINES_TOP = 10;
+const NO_LINE_DATA = 'unavailable (profile has no per-line sample data)';
 
 // A hot-line label: the line is the primary key, the function(s) V8 charged the samples to
 // follow as a colored hint (like Top CPU, the hint floats after the location, not column-aligned).
@@ -836,7 +872,6 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
     const heaviestResults = stacks ? null : trace.threads.map(t => topPaths(t));
     // Thread-wide hot source lines: the one lens that survives inlining (inlined ticks land on
     // the outer function's node, so they surface here even when the call tree hides them).
-    // Empty for trace inputs, which carry no positionTicks.
     const hotLinesResults = stacks ? null : trace.threads.map((t) => {
         if (!t.nodes) return [];
         return buildHotLines(t, [...t.nodes.keys()])
@@ -902,7 +937,9 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
                     out.push(paint('  Hot paths:', 'bold'));
                     renderHotTree(out, g.hotPath, g.total, paint, '    ');
                 }
-                if (g.hotLines?.length) {
+                if (!t.hasLineData) {
+                    out.push(`${paint('  Hot lines:', 'bold')} ${paint(NO_LINE_DATA, 'dim')}`);
+                } else if (g.hotLines?.length) {
                     out.push(`${paint('  Hot lines:', 'bold')} ${paint('(self time by source line; includes inlined code)', 'dim')}`);
                     const shown = g.hotLines.slice(0, top);
                     const rows = shown.map(e => [
@@ -973,7 +1010,10 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
         for (const line of table(topRows, ['right', 'right', 'left'])) out.push(line);
 
         const hotLines = hotLinesResults[ti];
-        if (hotLines.length) {
+        if (!t.hasLineData && t.busy > 0) {
+            out.push('');
+            out.push(`${paint('Hot lines:', 'bold')} ${paint(NO_LINE_DATA, 'dim')}`);
+        } else if (hotLines.length) {
             out.push('');
             out.push(`${paint('Hot lines (self time):', 'bold')} ${paint('(per source line; includes inlined code)', 'dim')}`);
             const rows = hotLines.slice(0, HOT_LINES_TOP).map(e => [

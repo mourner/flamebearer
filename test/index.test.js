@@ -451,8 +451,40 @@ test('formatReport runs on both fixture types and includes key sections', () => 
     const traceReport = formatReport(parseInput(traceBuf, 'test/fixtures/Trace-20260521T190407.json.gz'));
     assert.match(traceReport, /=== CrRendererMain ===/);
     assert.match(traceReport, /Top CPU \(self time\):/);
-    // Chrome traces have no positionTicks, so the hot-lines section is omitted entirely.
-    assert.doesNotMatch(traceReport, /Hot lines/);
+    // Chrome traces carry per-sample lines in ProfileChunks, so they get hot lines too.
+    assert.match(traceReport, /Hot lines \(self time\):/);
+});
+
+test('hot lines for Chrome traces come from per-sample ProfileChunk lines', () => {
+    const nodes = [
+        {id: 1, callFrame: {functionName: '(root)', url: '', lineNumber: -1, columnNumber: -1}},
+        {id: 2, callFrame: {functionName: 'foo', url: 'a.js', lineNumber: 9, columnNumber: 0}, parent: 1},
+        {id: 3, callFrame: {functionName: 'postMessage', url: '', lineNumber: -1, columnNumber: -1}, parent: 2},
+        {id: 4, callFrame: {functionName: 'wasm-function[2]', url: 'm.wasm', lineNumber: 0, columnNumber: 9, codeType: 'wasm'}, parent: 2}
+    ];
+    const chunk = data => ({name: 'ProfileChunk', id: '0xp', pid: 1, tid: 2, args: {data}});
+    const events = [
+        {name: 'Profile', id: '0xp', pid: 1, tid: 2, args: {data: {startTime: 0}}},
+        chunk({cpuProfile: {nodes, samples: [2, 2, 2]}, timeDeltas: [1000, 1000, 1000], lines: [12, 12, 11]}),
+        // A chunk without lines must not shift the next chunk's lines onto the wrong samples.
+        chunk({cpuProfile: {samples: [2]}, timeDeltas: [1000]}),
+        // 0 is V8's "no line info"; url-less native and wasm frames are skipped.
+        chunk({cpuProfile: {samples: [2, 3, 4]}, timeDeltas: [1000, 1000, 1000], lines: [0, 50, 1]})
+    ];
+    const t = parseTrace({traceEvents: events}).threads[0];
+    assert.deepEqual(t.nodes.get(2).positionTicks, [{line: 12, ticks: 2}, {line: 11, ticks: 1}]);
+    assert.equal(t.nodes.get(3).positionTicks, undefined);
+    assert.equal(t.nodes.get(4).positionTicks, undefined);
+
+    // foo's 5ms self time spreads over its 3 line-attributed samples.
+    const lines = Object.fromEntries(findStacks(t, 'foo')[0].hotLines.map(l => [l.line, l.time]));
+    assert.deepEqual(lines, {11: 5000 / 3, 12: 10000 / 3});
+});
+
+test('hot lines say so when the profile has no line data', () => {
+    const t = parseCpuProfile({...tinyCpuProfile, timeDeltas: tinyCpuProfile.timeDeltas.map(d => d * 100)}, 'tt');
+    assert.equal(t.hasLineData, false);
+    assert.match(formatReport({threads: [t]}), /Hot lines: unavailable/);
 });
 
 test('percentages are of busy time, not busy + idle; --stacks breakdowns are of fn total', () => {
