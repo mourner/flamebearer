@@ -23,6 +23,7 @@ filtering:
                         callers, callees, dominant descendant path, and hot
                         source lines (self time per line, incl. inlined code).
                         Same name in multiple files = one block per file.
+                        Repeatable or comma-separated: --stacks a,b
 
 output:
   --color / --no-color  force ANSI color (default: on if TTY and !$NO_COLOR)
@@ -41,7 +42,7 @@ try {
             to: {type: 'string'},
             thread: {type: 'string', multiple: true},
             top: {type: 'string'},
-            stacks: {type: 'string'},
+            stacks: {type: 'string', multiple: true},
             help: {type: 'boolean', short: 'h'}
         }
     }));

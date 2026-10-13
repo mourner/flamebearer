@@ -283,6 +283,15 @@ test('topPaths builds a heaviest-stacks tree rooted at real (non-system) entries
     assert.deepEqual(grandkids, ['drawLine', 'drawSymbols']);
 });
 
+test('formatReport --stacks takes several names, repeated or comma-separated', () => {
+    const t = parseCpuProfile({...tinyCpuProfile, timeDeltas: tinyCpuProfile.timeDeltas.map(d => d * 100)}, 'tt');
+    const report = formatReport({threads: [t]}, {stacks: ['bar,nope', 'foo']});
+    // Misses are reported up front without suppressing the names that did match.
+    assert.match(report, /no exact match for "nope"/);
+    const blocks = report.split('\n').filter(l => l.startsWith('Stacks:'));
+    assert.deepEqual(blocks.map(l => l.split(/\s+/)[1]), ['bar', 'foo']);
+});
+
 test('findStacks splits same-named functions in different files into separate groups', () => {
     const profile = {
         nodes: [

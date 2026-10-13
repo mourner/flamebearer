@@ -876,7 +876,11 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
     // often mostly idle, which would shrink every row and push real work under the floor.
     const pctOf = (us, base) => (base > 0 ? 100 * us / base : 0);
 
-    const stackResults = stacks ? trace.threads.map(t => findStacks(t, stacks)) : null;
+    // --stacks takes one or more names (repeated and/or comma-separated); blocks follow that order.
+    const stackNames = stacks ? [...new Set([stacks].flat().flatMap(s => s.split(','))
+        .map(s => s.trim()).filter(Boolean))] : null;
+    if (stackNames && !stackNames.length) stacks = null;
+    const stackResults = stacks ? trace.threads.map(t => stackNames.flatMap(name => findStacks(t, name))) : null;
     const heaviestResults = stacks ? null : trace.threads.map(t => topPaths(t));
     // Thread-wide hot source lines: the one lens that survives inlining (inlined ticks land on
     // the outer function's node, so they surface here even when the call tree hides them).
@@ -915,14 +919,19 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
         for (const line of table(rows, hasTags ? ['left', 'left'] : ['left'])) out.push(line);
     }
 
-    if (stacks && !stackResults.some(g => g.length)) {
-        // Principle 7: a silent empty report reads as "function isn't hot." Say it's a miss,
-        // and answer the likely near-miss in the same round-trip.
-        const suggestions = suggestNames(trace, stacks);
-        out.push(suggestions.length ?
-            `no exact match for "${stacks}"; closest: ${suggestions.join(', ')}` :
-            `no exact match for "${stacks}"`);
-        return out.join('\n');
+    if (stacks) {
+        // A silent miss reads as "function isn't hot." Say it's a miss, and answer the likely
+        // near-miss in the same round-trip.
+        const found = new Set(stackResults.flat().map(g => (g.frame.functionName || '(anonymous)').toLowerCase()));
+        const missed = stackNames.filter(name => !found.has(name.toLowerCase()));
+        if (missed.length && out.length) out.push('');
+        for (const name of missed) {
+            const suggestions = suggestNames(trace, name);
+            out.push(suggestions.length ?
+                `no exact match for "${name}"; closest: ${suggestions.join(', ')}` :
+                `no exact match for "${name}"`);
+        }
+        if (!found.size) return out.join('\n');
     }
 
     for (let ti = 0; ti < trace.threads.length; ti++) {

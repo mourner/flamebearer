@@ -71,6 +71,7 @@ Hot lines (self time): (per source line; includes inlined code)
 
 ```bash
 flamebearer trace.json --stacks load             # summary for a specific function
+flamebearer trace.json --stacks load,parse       # several functions in one run
 flamebearer trace.json --thread main --top 30    # restrict threads, more rows
 flamebearer trace.json --from 1200 --to 1800     # slice a time range (ms)
 
