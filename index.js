@@ -106,19 +106,19 @@ const IDLE_SAMPLE_NAMES = new Set(['(idle)', '(program)']);
 
 function buildThread({nodes, samples, timeDeltas, lines, startTime}, name) {
     const sampleTimes = new Array(samples.length);
+    const sampleDeltas = new Array(samples.length);
     const sampleFrames = new Array(samples.length);
-    const nodeSelfTime = new Map();
     let t = startTime;
     for (let i = 0; i < samples.length; i++) {
         const dt = timeDeltas[i] ?? 0;
         t += dt;
         sampleTimes[i] = t;
-        const id = samples[i];
-        const node = nodes.get(id);
-        if (node) sampleFrames[i] = node.callFrame;
-        nodeSelfTime.set(id, (nodeSelfTime.get(id) ?? 0) + dt);
+        sampleDeltas[i] = dt;
+        sampleFrames[i] = nodes.get(samples[i])?.callFrame;
     }
-    if (lines) addPositionTicks(nodes, samples, lines);
+    if (lines) {
+        for (const [id, ticks] of linePositionTicks(nodes, samples, lines)) nodes.get(id).positionTicks ??= ticks;
+    }
     let hasLineData = false;
     for (const n of nodes.values()) if (n.positionTicks) { hasLineData = true; break; }
     const nodeParent = new Map();
@@ -132,15 +132,24 @@ function buildThread({nodes, samples, timeDeltas, lines, startTime}, name) {
         if (list) list.push(id);
         else nodeChildren.set(parent, [id]);
     }
-    return {name, sampleTimes, sampleFrames, sampleIds: samples, startTime,
-        nodes, nodeParent, nodeChildren, nodeSelfTime, hasLineData,
-        ...aggregate(sampleTimes, sampleFrames, startTime, -Infinity, Infinity)};
+    return {name, sampleTimes, sampleDeltas, sampleFrames, sampleIds: samples, sampleLines: lines, startTime,
+        nodes, nodeParent, nodeChildren, nodeSelfTime: selfTimeByNode(samples, sampleDeltas), hasLineData,
+        ...aggregate(sampleTimes, sampleDeltas, sampleFrames)};
+}
+
+function selfTimeByNode(sampleIds, sampleDeltas) {
+    const nodeSelfTime = new Map();
+    for (let i = 0; i < sampleIds.length; i++) {
+        const id = sampleIds[i];
+        nodeSelfTime.set(id, (nodeSelfTime.get(id) ?? 0) + sampleDeltas[i]);
+    }
+    return nodeSelfTime;
 }
 
 // Trace profiles carry a source line per sample instead of cpuprofile's per-node positionTicks.
 // Both come from the same V8 tick symbolization (1-based, 0 = unknown), so fold the per-sample
 // lines into positionTicks and let hot lines and source map resolution treat them alike.
-function addPositionTicks(nodes, samples, lines) {
+function linePositionTicks(nodes, samples, lines) {
     const byNode = new Map();
     for (let i = 0; i < samples.length; i++) {
         const line = lines[i];
@@ -149,27 +158,24 @@ function addPositionTicks(nodes, samples, lines) {
         if (!counts) byNode.set(samples[i], counts = new Map());
         counts.set(line, (counts.get(line) ?? 0) + 1);
     }
+    const result = new Map();
     for (const [id, counts] of byNode) {
-        const node = nodes.get(id);
         // Native frames (postMessage, measure) get lines with no url to resolve them in, and wasm
         // frames are always line 1 (positions are byte offsets), which merges unrelated functions.
-        const f = node?.callFrame;
-        if (!f?.url || f.codeType === 'wasm' || node.positionTicks) continue;
-        node.positionTicks = [...counts].map(([line, ticks]) => ({line, ticks}));
+        const f = nodes.get(id)?.callFrame;
+        if (!f?.url || f.codeType === 'wasm') continue;
+        result.set(id, [...counts].map(([line, ticks]) => ({line, ticks})));
     }
+    return result;
 }
 
-function aggregate(sampleTimes, sampleFrames, startTime, fromUs, toUs) {
+function aggregate(sampleTimes, sampleDeltas, sampleFrames) {
     const selfByFrame = new Map();
-    let busy = 0, idle = 0, samples = 0, activeFrom = null, activeTo = null;
-    let prev = startTime;
-    for (let i = 0; i < sampleTimes.length; i++) {
+    let busy = 0, idle = 0, activeFrom = null, activeTo = null;
+    const samples = sampleTimes.length;
+    for (let i = 0; i < samples; i++) {
         const ts = sampleTimes[i];
-        const dt = ts - prev;
-        prev = ts;
-        if (ts < fromUs) continue;
-        if (ts > toUs) break;
-        samples++;
+        const dt = sampleDeltas[i];
         const f = sampleFrames[i];
         if (!f) continue;
         if (IDLE_SAMPLE_NAMES.has(f.functionName)) {
@@ -289,11 +295,37 @@ export function filterTrace(trace, {from, to, threads} = {}) {
     return {...trace, threads: sliced};
 }
 
+// Everything sample-derived is rebuilt over the range: stats, node self time (heaviest stacks,
+// --stacks, hot lines) and Chrome per-sample line ticks. A .cpuprofile's positionTicks only exist
+// per node for the whole profile, so its hot lines split in-range self time by whole-profile ticks.
 function sliceThread(t, fromUs, toUs) {
-    const agg = aggregate(t.sampleTimes, t.sampleFrames, t.startTime, fromUs, toUs);
+    const {sampleTimes} = t;
+    let i0 = 0;
+    while (i0 < sampleTimes.length && sampleTimes[i0] < fromUs) i0++;
+    let i1 = i0;
+    while (i1 < sampleTimes.length && sampleTimes[i1] <= toUs) i1++;
+
+    const sampleIds = t.sampleIds.slice(i0, i1);
+    const sampleDeltas = t.sampleDeltas.slice(i0, i1);
+    const sampleLines = t.sampleLines?.slice(i0, i1);
+    const sliced = {
+        sampleTimes: sampleTimes.slice(i0, i1),
+        sampleFrames: t.sampleFrames.slice(i0, i1),
+        sampleIds, sampleDeltas, sampleLines,
+        nodeSelfTime: selfTimeByNode(sampleIds, sampleDeltas)
+    };
+    if (sampleLines) {
+        const ticks = linePositionTicks(t.nodes, sampleIds, sampleLines);
+        sliced.nodes = new Map();
+        for (const [id, n] of t.nodes) {
+            sliced.nodes.set(id, n.positionTicks || ticks.has(id) ? {...n, positionTicks: ticks.get(id)} : n);
+        }
+    } else {
+        sliced.lineTicksWholeProfile = t.hasLineData;
+    }
     const longTasks = t.longTasks?.filter(lt => lt.ts >= fromUs && lt.ts + lt.dur <= toUs);
     const tasks = t.events ? computeBreakdown(t.events.filter(e => e.ts >= fromUs && e.ts + e.dur <= toUs)) : {};
-    return {...t, ...agg, longTasks, ...tasks};
+    return {...t, ...sliced, ...aggregate(sliced.sampleTimes, sampleDeltas, sliced.sampleFrames), longTasks, ...tasks};
 }
 
 export function resolveSourceMaps(trace, {load = loadSiblingMap} = {}) {
@@ -639,7 +671,7 @@ export function findStacks(thread, pattern) {
 }
 
 function findGCStacks(thread) {
-    const {nodes, nodeSelfTime, sampleIds, sampleFrames, sampleTimes, startTime} = thread;
+    const {nodes, nodeSelfTime, sampleIds, sampleFrames, sampleDeltas} = thread;
     let gcNode = null;
     for (const n of nodes.values()) {
         if (n.callFrame?.functionName === '(garbage collector)') { gcNode = n; break; }
@@ -649,13 +681,9 @@ function findGCStacks(thread) {
     const gcId = gcNode.id;
     const callers = new Map();
     let lastJsFrame = null;
-    let prev = startTime;
     for (let i = 0; i < sampleIds.length; i++) {
-        const ts = sampleTimes[i];
-        const dt = ts - prev;
-        prev = ts;
         if (sampleIds[i] === gcId) {
-            if (lastJsFrame) addFrame(callers, lastJsFrame, dt);
+            if (lastJsFrame) addFrame(callers, lastJsFrame, sampleDeltas[i]);
         } else {
             const f = sampleFrames[i];
             if (f && !SYSTEM_NAMES.has(f.functionName)) lastJsFrame = f;
@@ -857,6 +885,7 @@ const ACTIVE_WINDOW_FRAC = 0.9;
 // tail mostly echoes Top CPU for non-inlined code. Drill in with --stacks for the complete set.
 const HOT_LINES_TOP = 10;
 const NO_LINE_DATA = 'unavailable (profile has no per-line sample data)';
+const lineSplitNote = t => (t.lineTicksWholeProfile ? '; line split from whole profile' : '');
 
 // A hot-line label: the line is the primary key, the function(s) V8 charged the samples to
 // follow as a colored hint (like Top CPU, the hint floats after the location, not column-aligned).
@@ -970,7 +999,7 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
                 if (!t.hasLineData) {
                     out.push(`${paint('  Hot lines:', 'bold')} ${paint(NO_LINE_DATA, 'dim')}`);
                 } else if (g.hotLines?.length) {
-                    out.push(`${paint('  Hot lines:', 'bold')} ${paint('(self time by source line; includes inlined code)', 'dim')}`);
+                    out.push(`${paint('  Hot lines:', 'bold')} ${paint(`(self time by source line; includes inlined code${lineSplitNote(t)})`, 'dim')}`);
                     const shown = g.hotLines.slice(0, top);
                     const rows = shown.map(e => [
                         fmtMs(e.time),
@@ -1049,7 +1078,7 @@ export function formatReport(input, {top = 20, color = false, sourceMaps = true,
             out.push(`${paint('Hot lines:', 'bold')} ${paint(NO_LINE_DATA, 'dim')}`);
         } else if (hotLines.length) {
             out.push('');
-            out.push(`${paint('Hot lines (self time):', 'bold')} ${paint('(per source line; includes inlined code)', 'dim')}`);
+            out.push(`${paint('Hot lines (self time):', 'bold')} ${paint(`(per source line; includes inlined code${lineSplitNote(t)})`, 'dim')}`);
             const rows = hotLines.slice(0, HOT_LINES_TOP).map(e => [
                 fmtMs(e.time),
                 fmtPct(pctOf(e.time, t.busy)),

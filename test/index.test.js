@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {TraceMap} from '@jridgewell/trace-mapping';
-import {parseInput, parseTrace, parseCpuProfile, buildShortener, formatReport, resolveSourceMaps, findStacks, topPaths, suggestNames, buildHotLines} from '../index.js';
+import {parseInput, parseTrace, parseCpuProfile, buildShortener, formatReport, resolveSourceMaps, findStacks, topPaths, suggestNames, buildHotLines, filterTrace} from '../index.js';
 
 const tinyCpuProfile = {
     nodes: [
@@ -545,4 +545,58 @@ test('percentages are of busy time, not busy + idle; --stacks breakdowns are of 
     const stacks = formatReport({threads: [t]}, {stacks: 'main'});
     assert.match(stacks, /total 100\.0 ms \(100\.0% of busy\)/);
     assert.match(stacks, /10\.0 ms\s+10\.0%\s+small/);
+});
+
+test('--from/--to slice stacks, hot lines and GC callers, not just stats', () => {
+    // foo runs before 100ms, bar after; a GC sample follows each.
+    const profile = {
+        nodes: [
+            {id: 1, callFrame: {functionName: '(root)', url: '', lineNumber: -1, columnNumber: -1}, children: [2, 3, 4]},
+            {id: 2, callFrame: {functionName: 'foo', url: 'a.js', lineNumber: 0, columnNumber: 0},
+                positionTicks: [{line: 2, ticks: 1}]},
+            {id: 3, callFrame: {functionName: 'bar', url: 'a.js', lineNumber: 10, columnNumber: 0},
+                positionTicks: [{line: 12, ticks: 3}, {line: 13, ticks: 1}]},
+            {id: 4, callFrame: {functionName: '(garbage collector)', url: '', lineNumber: -1, columnNumber: -1}}
+        ],
+        samples: [2, 4, 3, 3, 4],
+        timeDeltas: [40000, 10000, 60000, 40000, 10000], // ends at 40, 50, 110, 150, 160 ms
+        startTime: 0
+    };
+    const whole = parseCpuProfile(profile, 'tt');
+    const t = filterTrace({threads: [whole]}, {from: 100}).threads[0];
+    assert.equal(t.busy, 110000);
+    assert.equal(t.nodeSelfTime.get(2) ?? 0, 0);
+    assert.deepEqual(topPaths(t).map(p => p.frame.functionName), ['bar']);
+
+    const lines = Object.fromEntries(findStacks(t, 'bar')[0].hotLines.map(l => [l.line, l.time]));
+    assert.deepEqual(lines, {12: 75000, 13: 25000});
+    const gc = findStacks(t, '(garbage collector)')[0];
+    assert.equal(gc.total, 10000);
+    assert.deepEqual(gc.callers.map(c => [c.frame.functionName, c.time]), [['bar', 10000]]);
+
+    // .cpuprofile line ticks are per node over the whole profile, so the split is approximate.
+    const report = formatReport({threads: [whole]}, {from: 100});
+    assert.match(report, /line split from whole profile/);
+    assert.doesNotMatch(report, /a\.js:2\b/);
+    assert.doesNotMatch(formatReport({threads: [whole]}), /line split from whole profile/);
+});
+
+test('--from/--to slice Chrome per-sample line ticks exactly', () => {
+    const nodes = [
+        {id: 1, callFrame: {functionName: '(root)', url: '', lineNumber: -1, columnNumber: -1}},
+        {id: 2, callFrame: {functionName: 'foo', url: 'a.js', lineNumber: 9, columnNumber: 0}, parent: 1}
+    ];
+    const events = [
+        {name: 'Profile', id: '0xp', pid: 1, tid: 2, args: {data: {startTime: 0}}},
+        {name: 'ProfileChunk', id: '0xp', pid: 1, tid: 2, args: {data: {
+            cpuProfile: {nodes, samples: [2, 2, 2, 2]}, timeDeltas: [1000, 1000, 1000, 1000], lines: [10, 10, 11, 11]
+        }}}
+    ];
+    const trace = parseTrace({traceEvents: events});
+    const t = filterTrace(trace, {from: 2.5}).threads[0];
+    const lines = Object.fromEntries(findStacks(t, 'foo')[0].hotLines.map(l => [l.line, l.time]));
+    assert.deepEqual(lines, {11: 2000});
+    // The unsliced thread keeps its whole-profile ticks.
+    assert.deepEqual(trace.threads[0].nodes.get(2).positionTicks, [{line: 10, ticks: 2}, {line: 11, ticks: 2}]);
+    assert.doesNotMatch(formatReport(trace, {from: 2.5}), /line split from whole profile/);
 });
