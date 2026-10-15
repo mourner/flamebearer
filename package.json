@@ -1,6 +1,6 @@
 {
   "name": "flamebearer",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "A JavaScript CPU trace analysis tool for agents and humans",
   "main": "index.js",
   "type": "module",
